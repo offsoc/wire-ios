@@ -32,6 +32,14 @@ public protocol UserRepositoryProtocol {
 
     func fetchSelfUser() -> ZMUser
 
+    /// Fetches a user locally
+    ///
+    /// - parameters
+    ///     - id: The ID of the user.
+    ///     - domain: The domain of the user.
+
+    func fetchUser(with id: UUID, domain: String?) -> ZMUser?
+
     /// Push self user supported protocols
     /// - Parameter supportedProtocols: A list of supported protocols.
 
@@ -50,6 +58,9 @@ public protocol UserRepositoryProtocol {
 
     func pullUsers(userIDs: [WireDataModel.QualifiedID]) async throws
 
+    /// Removes user push token from storage.
+
+    func removePushToken()
     /// Fetches a user with a specific id.
     /// - Parameter id: The ID of the user.
     /// - Returns: A `ZMUser` object.
@@ -100,6 +111,15 @@ public protocol UserRepositoryProtocol {
 
     func disableUserLegalHold() async throws
 
+    /// Deletes a user property.
+    ///
+    /// - parameters:
+    ///     - key: The user property key to delete.
+
+    func deleteUserProperty(
+        withKey key: UserProperty.Key
+    ) async
+
     /// Deletes the user account.
     ///
     /// - parameters:
@@ -112,12 +132,17 @@ public protocol UserRepositoryProtocol {
 
 public final class UserRepository: UserRepositoryProtocol {
 
+    enum DefaultsKeys: String {
+        case pushToken = "PushToken"
+    }
+
     // MARK: - Properties
 
     private let context: NSManagedObjectContext
     private let usersAPI: any UsersAPI
     private let selfUserAPI: any SelfUserAPI
     private let conversationRepository: any ConversationRepositoryProtocol
+    private let storage: UserDefaults
 
     // MARK: - Object lifecycle
 
@@ -125,18 +150,24 @@ public final class UserRepository: UserRepositoryProtocol {
         context: NSManagedObjectContext,
         usersAPI: any UsersAPI,
         selfUserAPI: any SelfUserAPI,
-        conversationRepository: ConversationRepositoryProtocol
+        conversationRepository: ConversationRepositoryProtocol,
+        sharedUserDefaults: UserDefaults = .standard
     ) {
         self.context = context
         self.usersAPI = usersAPI
         self.selfUserAPI = selfUserAPI
         self.conversationRepository = conversationRepository
+        storage = sharedUserDefaults
     }
 
     // MARK: - Public
 
     public func fetchSelfUser() -> ZMUser {
         ZMUser.selfUser(in: context)
+    }
+
+    public func fetchUser(with id: UUID, domain: String?) -> ZMUser? {
+        ZMUser.fetch(with: id, domain: domain, in: context)
     }
 
     public func pushSelfSupportedProtocols(
@@ -173,6 +204,13 @@ public final class UserRepository: UserRepositoryProtocol {
         } catch {
             throw UserRepositoryError.failedToFetchRemotely(error)
         }
+    }
+
+    public func removePushToken() {
+        storage.set(
+            nil,
+            forKey: DefaultsKeys.pushToken.rawValue
+        )
     }
 
     public func fetchUser(with id: UUID) async throws -> ZMUser {
@@ -244,11 +282,11 @@ public final class UserRepository: UserRepositoryProtocol {
             }
 
             let selfClient = selfUser.selfClient()
-            let isSameId = localClient.remoteIdentifier != selfClient?.remoteIdentifier
+            let isNotSameId = localClient.remoteIdentifier != selfClient?.remoteIdentifier
             let localClientActivationDate = localClient.activationDate
             let selfClientActivationDate = selfClient?.activationDate
 
-            if let selfClient, isSameId, let localClientActivationDate, let selfClientActivationDate {
+            if let selfClient, isNotSameId, let localClientActivationDate, let selfClientActivationDate {
                 let comparisonResult = localClientActivationDate
                     .compare(selfClientActivationDate)
 
@@ -298,6 +336,29 @@ public final class UserRepository: UserRepositoryProtocol {
         }
     }
 
+    public func deleteUserProperty(
+        withKey key: UserProperty.Key
+    ) async {
+        switch key {
+        case .wireReceiptMode:
+            let selfUser = fetchSelfUser()
+
+            await context.perform {
+                selfUser.readReceiptsEnabled = false
+                selfUser.readReceiptsEnabledChangedRemotely = true
+            }
+
+        case .wireTypingIndicatorMode:
+            // TODO: [WPB-726] feature not implemented yet
+            break
+
+        case .labels:
+            /// Already handled with `user.properties-set` event (adding new labels and removing old ones)
+            /// see `ConversationLabelsRepository`
+            break
+        }
+    }
+
     public func deleteUserAccount(
         for user: ZMUser,
         at date: Date
@@ -343,5 +404,4 @@ public final class UserRepository: UserRepositoryProtocol {
         persistedUser.supportedProtocols = user.supportedProtocols?.toDomainModel() ?? [.proteus]
         persistedUser.needsToBeUpdatedFromBackend = false
     }
-
 }

@@ -17,27 +17,26 @@
 //
 
 import Foundation
+@testable import WireAPI
 import WireAPISupport
 import WireDataModel
 import WireDataModelSupport
+@testable import WireDomain
 import WireDomainSupport
 import XCTest
 
-@testable import WireAPI
-@testable import WireDomain
+final class UserRepositoryTests: XCTestCase {
 
-class UserRepositoryTests: XCTestCase {
+    private var sut: UserRepository!
+    private var usersAPI: MockUsersAPI!
+    private var selfUsersAPI: MockSelfUserAPI!
+    private var conversationsRepository: MockConversationRepositoryProtocol!
+    private var stack: CoreDataStack!
+    private var coreDataStackHelper: CoreDataStackHelper!
+    private var modelHelper: ModelHelper!
+    private var mockUserDefaults: UserDefaults!
 
-    var sut: UserRepository!
-    var usersAPI: MockUsersAPI!
-    var selfUsersAPI: MockSelfUserAPI!
-    var conversationsRepository: MockConversationRepositoryProtocol!
-
-    var stack: CoreDataStack!
-    var coreDataStackHelper: CoreDataStackHelper!
-    var modelHelper: ModelHelper!
-
-    var context: NSManagedObjectContext {
+    private var context: NSManagedObjectContext {
         stack.syncContext
     }
 
@@ -49,11 +48,15 @@ class UserRepositoryTests: XCTestCase {
         usersAPI = MockUsersAPI()
         selfUsersAPI = MockSelfUserAPI()
         conversationsRepository = MockConversationRepositoryProtocol()
+        mockUserDefaults = UserDefaults(
+            suiteName: Scaffolding.defaultsTestSuiteName
+        )
         sut = UserRepository(
             context: context,
             usersAPI: usersAPI,
             selfUserAPI: selfUsersAPI,
-            conversationRepository: conversationsRepository
+            conversationRepository: conversationsRepository,
+            sharedUserDefaults: mockUserDefaults
         )
     }
 
@@ -63,6 +66,10 @@ class UserRepositoryTests: XCTestCase {
         usersAPI = nil
         selfUsersAPI = nil
         sut = nil
+        mockUserDefaults.removePersistentDomain(
+            forName: Scaffolding.defaultsTestSuiteName
+        )
+        mockUserDefaults = nil
         conversationsRepository = nil
         try coreDataStackHelper.cleanupDirectory()
         coreDataStackHelper = nil
@@ -145,6 +152,24 @@ class UserRepositoryTests: XCTestCase {
             XCTAssertEqual(user.supportedProtocols, Scaffolding.user1.supportedProtocols?.toDomainModel())
             XCTAssertFalse(user.needsToBeUpdatedFromBackend)
         }
+
+        func testRemovesPushToken() async throws {
+            // Given
+
+            let key = "PushToken"
+            let data = try JSONEncoder().encode(Scaffolding.pushToken)
+            mockUserDefaults.set(data, forKey: key)
+            XCTAssertNotNil(mockUserDefaults.object(forKey: key))
+
+            // When
+
+            sut.removePushToken()
+
+            // Then
+
+            let pushToken = mockUserDefaults.object(forKey: key)
+            XCTAssertNil(pushToken)
+        }
     }
 
     func testFetchOrCreateUserClient() async throws {
@@ -204,13 +229,11 @@ class UserRepositoryTests: XCTestCase {
     func testFetchSelfUser() async {
         // Given
 
-        await context.perform { [self] in
-            let selfUser = modelHelper.createSelfUser(
-                id: Scaffolding.userID,
-                domain: nil,
-                in: context
-            )
-        }
+        modelHelper.createSelfUser(
+            id: Scaffolding.userID,
+            domain: nil,
+            in: context
+        )
 
         // When
 
@@ -223,16 +246,34 @@ class UserRepositoryTests: XCTestCase {
         }
     }
 
+    func testFetchUser() async {
+        // Given
+
+        modelHelper.createUser(
+            id: Scaffolding.userID,
+            domain: nil,
+            in: context
+        )
+
+        // When
+
+        let user = sut.fetchUser(with: Scaffolding.userID, domain: nil)
+
+        // Then
+
+        await context.perform {
+            XCTAssertEqual(user?.remoteIdentifier, Scaffolding.userID)
+        }
+    }
+
     func testAddLegalholdRequest() async throws {
         // Given
 
-        await context.perform { [self] in
-            let selfUser = modelHelper.createSelfUser(
-                id: Scaffolding.userID,
-                domain: nil,
-                in: context
-            )
-        }
+        modelHelper.createSelfUser(
+            id: Scaffolding.userID,
+            domain: nil,
+            in: context
+        )
 
         // When
 
@@ -326,11 +367,12 @@ class UserRepositoryTests: XCTestCase {
 
     private enum Scaffolding {
         static let userID = UUID()
+        static let userPropertyKey = UserProperty.Key.wireReceiptMode
         static let userClientID = UUID().uuidString
         static let lastPrekeyId = 65_535
         static let base64encodedString = "pQABAQoCoQBYIPEFMBhOtG0dl6gZrh3kgopEK4i62t9sqyqCBckq3IJgA6EAoQBYIC9gPmCdKyqwj9RiAaeSsUI7zPKDZS+CjoN+sfihk/5VBPY="
 
-        nonisolated(unsafe) static let remoteUserClient = WireAPI.UserClient(
+        static let remoteUserClient = WireAPI.UserClient(
             id: userClientID,
             type: .permanent,
             activationDate: .now,
@@ -350,7 +392,7 @@ class UserRepositoryTests: XCTestCase {
             )
         )
 
-        nonisolated(unsafe) static let user1 = User(
+        static let user1 = User(
             id: QualifiedID(uuid: UUID(), domain: "example.com"),
             name: "user1",
             handle: "handle1",
@@ -364,6 +406,17 @@ class UserRepositoryTests: XCTestCase {
             supportedProtocols: [.mls],
             legalholdStatus: .disabled
         )
+
+        static let deviceToken = Data(repeating: 0x41, count: 10)
+
+        nonisolated(unsafe) static let pushToken = PushToken(
+            deviceToken: deviceToken,
+            appIdentifier: "com.wire",
+            transportType: "APNS_VOIP",
+            tokenType: .voip
+        )
+
+        static let defaultsTestSuiteName = UUID().uuidString
     }
 
 }
